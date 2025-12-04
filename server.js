@@ -328,7 +328,7 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 // ----------------------------------------
 // Start server
 // ----------------------------------------
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8082;
 app.listen(PORT, () => {
   console.log(`walla-transactions scraper listening on port ${PORT}`);
 });
