@@ -233,10 +233,12 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
       console.log("[EXPORT] After initial goto, URL:", page.url());
 
+      const isLoginPage = (url) => new URL(url).pathname.includes("/login");
+
       //
       // 2) If we got redirected to login, perform login there
       //
-      if (page.url().includes("/login")) {
+      if (isLoginPage(page.url())) {
         console.log("[EXPORT] Detected login redirect, performing login...");
         await loginOnCurrentPage(page, username, password);
 
@@ -256,19 +258,33 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       }
 
       console.log("[EXPORT] Post-login URL:", page.url());
+      if (isLoginPage(page.url())) {
+        throw new Error(
+          `Still on login page after attempted login. Current URL: ${page.url()}`
+        );
+      }
+
       await page.waitForTimeout(3000); // let React render
 
       //
       // 3) Find Export button
       //
-      const exportLocator =
-        (await page.$('button:has-text("Export")')) ||
-        (await page.$('div:has-text("Export")')) ||
-        (await page.$('text=Export'));
+      const exportLocator = page
+        .locator(
+          [
+            "button:has-text('Export')",
+            "[role='button']:has-text('Export')",
+            "div:has-text('Export')",
+            "text=Export",
+          ].join(", "),
+        )
+        .first();
 
-      if (!exportLocator) {
+      try {
+        await exportLocator.waitFor({ state: "visible", timeout: 45000 });
+      } catch (err) {
         throw new Error(
-          `Export button not found on report page. Current URL: ${page.url()}`
+          `Export button not found or not visible on report page. Current URL: ${page.url()} | Inner error: ${err}`
         );
       }
 
