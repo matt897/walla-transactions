@@ -104,80 +104,33 @@ async function withBrowser(fn, opts = {}) {
 }
 
 // ----------------------------------------
-// Login helper – logs in on the *current* page
+// Login helper – logs in on the *current* page using accessible labels
 // ----------------------------------------
 async function loginOnCurrentPage(page, username, password) {
   console.log("[LOGIN] Attempting login on URL:", page.url());
 
-  const emailCandidates = [
-    'input[type="email"]',
-    'input[name*="email" i]',
-    'input[id*="email" i]',
-    'input[placeholder*="email" i]',
-    'input[type="text"][name*="email" i]',
-    'input[type="text"][id*="email" i]',
-    'input[type="text"][name*="user" i]',
-    'input[type="text"][id*="user" i]',
-  ];
+  const emailInput = page.getByLabel(/email/i);
+  const passwordInput = page.getByLabel(/password/i);
 
-  let emailInput = null;
-  for (const sel of emailCandidates) {
-    emailInput = await page.$(sel);
-    if (emailInput) {
-      console.log("[LOGIN] Found email input via selector:", sel);
-      break;
-    }
-  }
-  if (!emailInput) {
-    throw new Error("Email/username input not found on login page");
-  }
-
-  const passwordCandidates = [
-    'input[type="password"]',
-    'input[name*="pass" i]',
-    'input[id*="pass" i]',
-    'input[autocomplete="current-password"]',
-  ];
-
-  let passwordInput = null;
-  for (const sel of passwordCandidates) {
-    passwordInput = await page.$(sel);
-    if (passwordInput) {
-      console.log("[LOGIN] Found password input via selector:", sel);
-      break;
-    }
-  }
-  if (!passwordInput) {
-    throw new Error("Password input not found on login page");
-  }
+  await Promise.all([
+    emailInput.waitFor({ state: "visible", timeout: 20000 }),
+    passwordInput.waitFor({ state: "visible", timeout: 20000 }),
+  ]);
 
   await emailInput.fill(username);
   await passwordInput.fill(password);
 
-  const loginButtonCandidates = [
-    'button:has-text("Log in")',
-    'button:has-text("Login")',
-    'button:has-text("Sign in")',
-    'button:has-text("Sign In")',
-    'button[type="submit"]',
-    'input[type="submit"]',
-  ];
+  const loginButton = page
+    .getByRole("button", { name: /log in|login|sign in/i })
+    .first();
 
-  let loginButton = null;
-  for (const sel of loginButtonCandidates) {
-    loginButton = await page.$(sel);
-    if (loginButton) {
-      console.log("[LOGIN] Found login button via selector:", sel);
-      break;
-    }
-  }
-  if (!loginButton) {
-    throw new Error("Login button not found on login page");
-  }
+  await loginButton.waitFor({ state: "visible", timeout: 15000 });
 
   await Promise.all([
-    page.waitForNavigation({ timeout: 30000, waitUntil: "domcontentloaded" }).catch(() => {}),
-    loginButton.click({ force: true }),
+    page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 30000,
+    }),
+    loginButton.click(),
   ]);
 
   console.log("[LOGIN] Clicked login button, current URL:", page.url());
@@ -189,6 +142,22 @@ async function loginOnCurrentPage(page, username, password) {
 // GET /export-walla-first-purchase?start=YYYY-MM-DD&end=YYYY-MM-DD
 // Optional: ?webhook=https://... to POST the file somewhere
 // ----------------------------------------
+const isLoginPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/login");
+  } catch {
+    return false;
+  }
+};
+
+const isReportPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/reports/first-purchase");
+  } catch {
+    return false;
+  }
+};
+
 app.get("/export-walla-first-purchase", async (req, res) => {
   const { start, end, webhook } = req.query;
 
@@ -215,8 +184,6 @@ app.get("/export-walla-first-purchase", async (req, res) => {
     const result = await withBrowser(async ({ page }) => {
       //
       // 1) Build first-purchase report URL with dates
-      //    We go there *first*, Walla will redirect to /login?redirectUrl=...
-      //
       const reportUrl = new URL(
         "https://manage.hellowalla.com/the-pearl/reports/first-purchase"
       );
@@ -228,9 +195,14 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       reportUrl.searchParams.set("groupBy", "week");
 
       const reportUrlStr = reportUrl.toString();
-      console.log("[EXPORT] Navigating to report URL:", reportUrlStr);
 
-      await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+      // 2) Navigate explicitly to login with redirect to report
+      const loginUrl = `https://manage.hellowalla.com/login?redirectUrl=${encodeURIComponent(
+        reportUrlStr
+      )}&bizId=2657&bizName=The+Pearl`;
+
+      console.log("[EXPORT] Navigating to login URL:", loginUrl);
+      await page.goto(loginUrl, { waitUntil: "domcontentloaded" });
       console.log("[EXPORT] After initial goto, URL:", page.url());
 
       const isLoginPage = (url) => new URL(url).pathname.includes("/login");
@@ -242,7 +214,6 @@ app.get("/export-walla-first-purchase", async (req, res) => {
         console.log("[EXPORT] Detected login redirect, performing login...");
         await loginOnCurrentPage(page, username, password);
 
-        // After login, Walla should send us to redirectUrl (the report)
         try {
           await page.waitForURL(
             (url) =>
@@ -251,8 +222,9 @@ app.get("/export-walla-first-purchase", async (req, res) => {
             { timeout: 30000 }
           );
         } catch {
-          // Fallback: just go to the report URL again now that we're logged in
-          console.log("[EXPORT] Login done but did not reach report; going there explicitly...");
+          console.log(
+            "[EXPORT] Login done but did not reach report; going there explicitly..."
+          );
           await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
         }
       }
