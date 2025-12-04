@@ -1,5 +1,5 @@
 {
-  "name": "walla-transcations",
+  "name": "walla-transactions",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",

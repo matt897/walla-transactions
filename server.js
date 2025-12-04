@@ -1,19 +1,37 @@
 // server.js
-// Walla "first purchase" export scraper – ES module
+// Walla "first purchase" export scraper
 
 import express from "express";
 import cors from "cors";
 import { chromium, devices } from "playwright";
-import { Readable } from "stream";
 
+process.on("unhandledRejection", (reason) => {
+  console.error("[FATAL] UnhandledPromiseRejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[FATAL] UncaughtException:", err);
+});
+
+// Create app
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 // ----------------------------------------
-// Simple healthcheck
+// Basic request logger (optional but handy)
 // ----------------------------------------
-app.get("/healthz", (_req, res) => res.send("ok"));
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.url}`);
+  next();
+});
+
+// ----------------------------------------
+// Healthcheck
+// ----------------------------------------
+app.get("/healthz", (_req, res) => {
+  res.send("ok");
+});
 
 // ----------------------------------------
 // Optional API-key auth (SCRAPER_TOKEN)
@@ -25,7 +43,7 @@ app.use((req, res, next) => {
   const token = req.get("x-api-key") || req.query.key;
   if (token === AUTH_TOKEN) return next();
 
-  return res.status(401).json({ error: "unauthorized" });
+  return res.status(401).json({ ok: false, error: "unauthorized" });
 });
 
 // ----------------------------------------
@@ -86,6 +104,86 @@ async function withBrowser(fn, opts = {}) {
 }
 
 // ----------------------------------------
+// Login helper – logs in on the *current* page
+// ----------------------------------------
+async function loginOnCurrentPage(page, username, password) {
+  console.log("[LOGIN] Attempting login on URL:", page.url());
+
+  const emailCandidates = [
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[id*="email" i]',
+    'input[placeholder*="email" i]',
+    'input[type="text"][name*="email" i]',
+    'input[type="text"][id*="email" i]',
+    'input[type="text"][name*="user" i]',
+    'input[type="text"][id*="user" i]',
+  ];
+
+  let emailInput = null;
+  for (const sel of emailCandidates) {
+    emailInput = await page.$(sel);
+    if (emailInput) {
+      console.log("[LOGIN] Found email input via selector:", sel);
+      break;
+    }
+  }
+  if (!emailInput) {
+    throw new Error("Email/username input not found on login page");
+  }
+
+  const passwordCandidates = [
+    'input[type="password"]',
+    'input[name*="pass" i]',
+    'input[id*="pass" i]',
+    'input[autocomplete="current-password"]',
+  ];
+
+  let passwordInput = null;
+  for (const sel of passwordCandidates) {
+    passwordInput = await page.$(sel);
+    if (passwordInput) {
+      console.log("[LOGIN] Found password input via selector:", sel);
+      break;
+    }
+  }
+  if (!passwordInput) {
+    throw new Error("Password input not found on login page");
+  }
+
+  await emailInput.fill(username);
+  await passwordInput.fill(password);
+
+  const loginButtonCandidates = [
+    'button:has-text("Log in")',
+    'button:has-text("Login")',
+    'button:has-text("Sign in")',
+    'button:has-text("Sign In")',
+    'button[type="submit"]',
+    'input[type="submit"]',
+  ];
+
+  let loginButton = null;
+  for (const sel of loginButtonCandidates) {
+    loginButton = await page.$(sel);
+    if (loginButton) {
+      console.log("[LOGIN] Found login button via selector:", sel);
+      break;
+    }
+  }
+  if (!loginButton) {
+    throw new Error("Login button not found on login page");
+  }
+
+  await Promise.all([
+    page.waitForNavigation({ timeout: 30000, waitUntil: "domcontentloaded" }).catch(() => {}),
+    loginButton.click({ force: true }),
+  ]);
+
+  console.log("[LOGIN] Clicked login button, current URL:", page.url());
+}
+
+// ----------------------------------------
 // Walla First-Purchase Export Route
 // ----------------------------------------
 // GET /export-walla-first-purchase?start=YYYY-MM-DD&end=YYYY-MM-DD
@@ -115,47 +213,10 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 
   try {
     const result = await withBrowser(async ({ page }) => {
-      // 1) Login page
-      await page.goto("https://manage.hellowalla.com/login", {
-        waitUntil: "domcontentloaded",
-      });
-
-      const emailSelector = [
-        'input[type="email"]',
-        'input[name="email"]',
-        'input[autocomplete="email"]',
-        'input[id*="email" i]',
-      ].join(", ");
-
-      const passwordSelector = [
-        'input[type="password"]',
-        'input[name="password"]',
-        'input[autocomplete="current-password"]',
-        'input[id*="password" i]',
-      ].join(", ");
-
-      await page.waitForSelector(emailSelector, { timeout: 20000 });
-      await page.waitForSelector(passwordSelector, { timeout: 20000 });
-
-      await page.fill(emailSelector, username);
-      await page.fill(passwordSelector, password);
-
-      const loginButton =
-        (await page.$('button:has-text("Log in")')) ||
-        (await page.$('button:has-text("Login")')) ||
-        (await page.$('button[type="submit"]')) ||
-        (await page.$('input[type="submit"]'));
-
-      if (!loginButton) {
-        throw new Error("Walla login button not found");
-      }
-
-      await Promise.all([
-        page.waitForLoadState("networkidle"),
-        loginButton.click({ force: true }),
-      ]);
-
-      // 2) Build first-purchase report URL with dates
+      //
+      // 1) Build first-purchase report URL with dates
+      //    We go there *first*, Walla will redirect to /login?redirectUrl=...
+      //
       const reportUrl = new URL(
         "https://manage.hellowalla.com/the-pearl/reports/first-purchase"
       );
@@ -166,22 +227,56 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       reportUrl.searchParams.set("endDate", String(end));
       reportUrl.searchParams.set("groupBy", "week");
 
-      await page.goto(reportUrl.toString(), {
-        waitUntil: "networkidle",
-      });
+      const reportUrlStr = reportUrl.toString();
+      console.log("[EXPORT] Navigating to report URL:", reportUrlStr);
 
-      await page.waitForTimeout(3000);
+      await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+      console.log("[EXPORT] After initial goto, URL:", page.url());
 
-      // 3) Find & click Export
-      const exportLocator =
-        (await page.$('text=Export')) ||
-        (await page.$('button:has-text("Export")')) ||
-        (await page.$('div:has-text("Export")'));
+      //
+      // 2) If we got redirected to login, perform login there
+      //
+      if (page.url().includes("/login")) {
+        console.log("[EXPORT] Detected login redirect, performing login...");
+        await loginOnCurrentPage(page, username, password);
 
-      if (!exportLocator) {
-        throw new Error("Export button not found on report page");
+        // After login, Walla should send us to redirectUrl (the report)
+        try {
+          await page.waitForURL(
+            (url) =>
+              !url.pathname.includes("/login") &&
+              url.href.includes("/reports/first-purchase"),
+            { timeout: 30000 }
+          );
+        } catch {
+          // Fallback: just go to the report URL again now that we're logged in
+          console.log("[EXPORT] Login done but did not reach report; going there explicitly...");
+          await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+        }
       }
 
+      console.log("[EXPORT] Post-login URL:", page.url());
+      await page.waitForTimeout(3000); // let React render
+
+      //
+      // 3) Find Export button
+      //
+      const exportLocator =
+        (await page.$('button:has-text("Export")')) ||
+        (await page.$('div:has-text("Export")')) ||
+        (await page.$('text=Export'));
+
+      if (!exportLocator) {
+        throw new Error(
+          `Export button not found on report page. Current URL: ${page.url()}`
+        );
+      }
+
+      console.log("[EXPORT] Found Export button, clicking...");
+
+      //
+      // 4) Click Export & capture the download
+      //
       const [download] = await Promise.all([
         page.waitForEvent("download", { timeout: 120000 }),
         exportLocator.click({ force: true }),
@@ -200,6 +295,8 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 
       const buffer = await streamToBuffer(stream);
       const fileBase64 = buffer.toString("base64");
+
+      console.log("[EXPORT] Download complete:", fileName, mimeType);
 
       return { fileName, mimeType, fileBase64 };
     });
@@ -245,5 +342,5 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 // ----------------------------------------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`walla-transcations scraper listening on port ${PORT}`);
+  console.log(`walla-transactions scraper listening on port ${PORT}`);
 });
