@@ -161,6 +161,22 @@ const isReportPage = (url) => {
 // GET /export-walla-first-purchase?start=YYYY-MM-DD&end=YYYY-MM-DD
 // Optional: ?webhook=https://... to POST the file somewhere
 // ----------------------------------------
+const isLoginPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/login");
+  } catch {
+    return false;
+  }
+};
+
+const isReportPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/reports/first-purchase");
+  } catch {
+    return false;
+  }
+};
+
 app.get("/export-walla-first-purchase", async (req, res) => {
   console.log("[EXPORT] Incoming request:", req.query);
 
