@@ -255,7 +255,7 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       } catch (err) {
         console.log("[EXPORT] Export button role locator failed, retrying by text...");
         exportLocator = page.getByText(/^\s*export\s*$/i).first();
-        await exportLocator.waitFor({ state: "visible", timeout: 15000 });
+        await exportLocator.waitFor({ state: "visible", timeout: 60000 });
       }
 
       console.log("[EXPORT] Found Export button, clicking...");
