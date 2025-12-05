@@ -159,6 +159,8 @@ const isReportPage = (url) => {
 };
 
 app.get("/export-walla-first-purchase", async (req, res) => {
+  console.log("[EXPORT] Incoming request:", req.query);
+
   const { start, end, webhook } = req.query;
 
   if (!start || !end) {
@@ -181,6 +183,8 @@ app.get("/export-walla-first-purchase", async (req, res) => {
   }
 
   try {
+    console.log("[EXPORT] Launching browser...");
+
     const result = await withBrowser(async ({ page }) => {
       //
       // 1) Build first-purchase report URL with dates
@@ -205,13 +209,9 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       await page.goto(loginUrl, { waitUntil: "domcontentloaded" });
       console.log("[EXPORT] After initial goto, URL:", page.url());
 
-      const isLoginPage = (url) => new URL(url).pathname.includes("/login");
-
-      //
-      // 2) If we got redirected to login, perform login there
-      //
+      // 3) If we are on login, perform login and wait for redirect off login
       if (isLoginPage(page.url())) {
-        console.log("[EXPORT] Detected login redirect, performing login...");
+        console.log("[EXPORT] Detected login page, performing login...");
         await loginOnCurrentPage(page, username, password);
 
         try {
@@ -236,28 +236,31 @@ app.get("/export-walla-first-purchase", async (req, res) => {
         );
       }
 
+      if (!isReportPage(page.url())) {
+        console.log("[EXPORT] Navigating to report URL after login...");
+        await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+      }
+
+      if (isLoginPage(page.url())) {
+        throw new Error(
+          `Unexpected redirect back to login after navigation. Current URL: ${page.url()}`
+        );
+      }
+
       await page.waitForTimeout(3000); // let React render
 
       //
       // 3) Find Export button
       //
-      const exportLocator = page
-        .locator(
-          [
-            "button:has-text('Export')",
-            "[role='button']:has-text('Export')",
-            "div:has-text('Export')",
-            "text=Export",
-          ].join(", "),
-        )
-        .first();
+      let exportLocator = page.getByRole("button", { name: /export/i }).first();
 
       try {
         await exportLocator.waitFor({ state: "visible", timeout: 45000 });
       } catch (err) {
-        throw new Error(
-          `Export button not found or not visible on report page. Current URL: ${page.url()} | Inner error: ${err}`
-        );
+        // Fallback to text match if role locator fails
+        console.log("[EXPORT] Export button role locator failed, retrying by text...");
+        exportLocator = page.getByText(/^\s*export\s*$/i).first();
+        await exportLocator.waitFor({ state: "visible", timeout: 15000 });
       }
 
       console.log("[EXPORT] Found Export button, clicking...");
@@ -289,6 +292,8 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       return { fileName, mimeType, fileBase64 };
     });
 
+    console.log("[EXPORT] Browser run finished, preparing response...");
+
     // Optional: send to webhook
     let webhookResult = null;
     if (webhook) {
@@ -316,7 +321,7 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       webhookResult,
     });
   } catch (err) {
-    console.error("Walla export failed:", err);
+    console.error("[EXPORT] Walla export failed:", err);
     return res.status(500).json({
       ok: false,
       error: "export_failed",
