@@ -81,6 +81,9 @@ async function withBrowser(fn, opts = {}) {
       viewport: { width: 1360, height: 1800 },
     });
 
+    context.setDefaultNavigationTimeout(180000);
+    context.setDefaultTimeout(180000);
+
     await context.addInitScript(() => {
       try {
         window.scrollTo(0, 0);
@@ -107,51 +110,44 @@ async function loginOnCurrentPage(page, username, password) {
   const emailInput = page.getByLabel(/email/i).first();
   const passwordInput = page.getByLabel(/password/i).first();
   const loginButton = page
-    .locator(
-      [
-        "button:has-text('Log in')",
-        "button:has-text('Sign in')",
-        "button:has-text('Login')",
-        "[type='submit']",
-      ].join(", ")
-    )
+    .getByRole("button", { name: /log in|login|sign in/i })
     .first();
 
-  await Promise.all([
-    emailInput.waitFor({ state: "visible", timeout: 15000 }),
-    passwordInput.waitFor({ state: "visible", timeout: 15000 }),
-  ]);
+  try {
+    await emailInput.waitFor({ state: "visible", timeout: 15000 });
+    console.log("[LOGIN] Email input found");
+  } catch (err) {
+    throw new Error("[LOGIN] Email input not found: " + err);
+  }
+
+  try {
+    await passwordInput.waitFor({ state: "visible", timeout: 15000 });
+    console.log("[LOGIN] Password input found");
+  } catch (err) {
+    throw new Error("[LOGIN] Password input not found: " + err);
+  }
 
   await emailInput.fill(username);
   await passwordInput.fill(password);
-  await loginButton.waitFor({ state: "visible", timeout: 15000 });
+
+  try {
+    await loginButton.waitFor({ state: "visible", timeout: 15000 });
+    console.log("[LOGIN] Login button found");
+  } catch (err) {
+    throw new Error("[LOGIN] Login button not found: " + err);
+  }
 
   await Promise.all([
     page.waitForURL((url) => !url.pathname.includes("/login"), {
-      timeout: 30000,
+      timeout: 60000,
     }),
     loginButton.click(),
   ]);
 
   console.log("[LOGIN] Clicked login button, current URL:", page.url());
-}
 
-// ----------------------------------------
-// Utility URL helpers
-// ----------------------------------------
-function isLoginPage(url) {
-  try {
-    return new URL(url).pathname.includes("/login");
-  } catch {
-    return false;
-  }
-}
-
-function isReportPage(url) {
-  try {
-    return new URL(url).pathname.includes("/reports/first-purchase");
-  } catch {
-    return false;
+  if (page.url().includes("/login")) {
+    throw new Error(`Login failed – still on login page: ${page.url()}`);
   }
 }
 
@@ -243,6 +239,8 @@ app.get("/export-walla-first-purchase", async (req, res) => {
             "[EXPORT] Login done but did not reach report; going there explicitly..."
           );
           await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+          await page.waitForLoadState("networkidle", { timeout: 60000 });
+          console.log("[EXPORT] URL after fallback report navigation:", page.url());
         }
       }
 
@@ -256,25 +254,50 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       if (!isReportPage(page.url())) {
         console.log("[EXPORT] Navigating to report URL after login...");
         await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+        await page.waitForLoadState("networkidle", { timeout: 60000 });
+        console.log("[EXPORT] URL after explicit report navigation:", page.url());
       }
 
       if (isLoginPage(page.url())) {
         throw new Error(
-          `Unexpected redirect back to login after navigation. Current URL: ${page.url()}`
+          `Unexpected redirect back to login: ${page.url()}`
         );
       }
 
       await page.waitForTimeout(3000); // let React render
 
-      // 3) Find Export button
+      // 3) Wait for table/header and find Export button
+      await page
+        .getByText(/client id/i)
+        .first()
+        .waitFor({ state: "visible", timeout: 60000 })
+        .catch(() => {});
+
       let exportLocator = page.getByRole("button", { name: /export/i }).first();
 
       try {
-        await exportLocator.waitFor({ state: "visible", timeout: 45000 });
+        await exportLocator.waitFor({ state: "visible", timeout: 30000 });
       } catch (err) {
-        console.log("[EXPORT] Export button role locator failed, retrying by text...");
-        exportLocator = page.getByText(/^\s*export\s*$/i).first();
-        await exportLocator.waitFor({ state: "visible", timeout: 15000 });
+        console.log(
+          "[EXPORT] Role-based export button lookup failed, trying text-only selector...",
+          err
+        );
+        exportLocator = page.getByText(/export/i).first();
+        try {
+          await exportLocator.waitFor({ state: "visible", timeout: 30000 });
+        } catch (fallbackErr) {
+          const bodyText = await page
+            .textContent("body")
+            .catch(() => "<unable to read body>");
+          console.log("[EXPORT] Current URL when failing to find export:", page.url());
+          console.log(
+            "[EXPORT] Body excerpt:",
+            bodyText ? bodyText.slice(0, 500) : "<no body text>"
+          );
+          throw new Error(
+            `Export button not found – likely no data in this date range. Current URL: ${page.url()}`
+          );
+        }
       }
 
       console.log("[EXPORT] Found Export button, clicking...");
@@ -334,10 +357,23 @@ app.get("/export-walla-first-purchase", async (req, res) => {
     });
   } catch (err) {
     console.error("[EXPORT] Walla export failed:", err);
+    const message = String(err);
+
+    if (
+      message.includes("Export button not found") ||
+      message.toLowerCase().includes("likely no data")
+    ) {
+      return res.status(200).json({
+        ok: false,
+        error: "no_export_button",
+        details: message,
+      });
+    }
+
     return res.status(500).json({
       ok: false,
       error: "export_failed",
-      details: String(err),
+      details: message,
     });
   }
 });
@@ -345,7 +381,7 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 // ----------------------------------------
 // Start server
 // ----------------------------------------
-const PORT = process.env.PORT || 8082;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`walla-transactions scraper listening on port ${PORT}`);
 });
