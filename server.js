@@ -239,7 +239,11 @@ app.get("/export-walla-first-purchase", async (req, res) => {
             "[EXPORT] Login done but did not reach report; going there explicitly..."
           );
           await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
-          await page.waitForLoadState("networkidle", { timeout: 60000 });
+try {
+  await page.waitForLoadState("networkidle", { timeout: 60000 });
+} catch (err) {
+  console.warn("[EXPORT] networkidle never reached, continuing anyway:", err);
+}
           console.log("[EXPORT] URL after fallback report navigation:", page.url());
         }
       }
