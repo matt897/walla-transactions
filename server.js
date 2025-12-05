@@ -27,7 +27,7 @@ app.use((req, _res, next) => {
 });
 
 // ----------------------------------------
-// Healthcheck
+// Healthcheck (must always respond)
 // ----------------------------------------
 app.get("/healthz", (_req, res) => {
   res.send("ok");
@@ -78,17 +78,12 @@ async function withBrowser(fn, opts = {}) {
       ignoreHTTPSErrors: true,
       locale: "en-US",
       timezoneId: "America/New_York",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      viewport: { width: 1360, height: 1800 },
     });
-
-    context.setDefaultNavigationTimeout(120000);
-    context.setDefaultTimeout(90000);
 
     await context.addInitScript(() => {
       try {
-        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        window.scrollTo(0, 0);
       } catch {
         // ignore
       }
@@ -109,21 +104,26 @@ async function withBrowser(fn, opts = {}) {
 async function loginOnCurrentPage(page, username, password) {
   console.log("[LOGIN] Attempting login on URL:", page.url());
 
-  const emailInput = page.getByLabel(/email/i);
-  const passwordInput = page.getByLabel(/password/i);
+  const emailInput = page.getByLabel(/email/i).first();
+  const passwordInput = page.getByLabel(/password/i).first();
+  const loginButton = page
+    .locator(
+      [
+        "button:has-text('Log in')",
+        "button:has-text('Sign in')",
+        "button:has-text('Login')",
+        "[type='submit']",
+      ].join(", ")
+    )
+    .first();
 
   await Promise.all([
-    emailInput.waitFor({ state: "visible", timeout: 20000 }),
-    passwordInput.waitFor({ state: "visible", timeout: 20000 }),
+    emailInput.waitFor({ state: "visible", timeout: 15000 }),
+    passwordInput.waitFor({ state: "visible", timeout: 15000 }),
   ]);
 
   await emailInput.fill(username);
   await passwordInput.fill(password);
-
-  const loginButton = page
-    .getByRole("button", { name: /log in|login|sign in/i })
-    .first();
-
   await loginButton.waitFor({ state: "visible", timeout: 15000 });
 
   await Promise.all([
@@ -135,6 +135,25 @@ async function loginOnCurrentPage(page, username, password) {
 
   console.log("[LOGIN] Clicked login button, current URL:", page.url());
 }
+
+// ----------------------------------------
+// Utility URL helpers
+// ----------------------------------------
+const isLoginPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/login");
+  } catch {
+    return false;
+  }
+};
+
+const isReportPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/reports/first-purchase");
+  } catch {
+    return false;
+  }
+};
 
 // ----------------------------------------
 // Walla First-Purchase Export Route
@@ -186,7 +205,6 @@ app.get("/export-walla-first-purchase", async (req, res) => {
     console.log("[EXPORT] Launching browser...");
 
     const result = await withBrowser(async ({ page }) => {
-      //
       // 1) Build first-purchase report URL with dates
       const reportUrl = new URL(
         "https://manage.hellowalla.com/the-pearl/reports/first-purchase"
@@ -209,7 +227,6 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       await page.goto(loginUrl, { waitUntil: "domcontentloaded" });
       console.log("[EXPORT] After initial goto, URL:", page.url());
 
-      // 3) If we are on login, perform login and wait for redirect off login
       if (isLoginPage(page.url())) {
         console.log("[EXPORT] Detected login page, performing login...");
         await loginOnCurrentPage(page, username, password);
@@ -249,15 +266,12 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 
       await page.waitForTimeout(3000); // let React render
 
-      //
       // 3) Find Export button
-      //
       let exportLocator = page.getByRole("button", { name: /export/i }).first();
 
       try {
         await exportLocator.waitFor({ state: "visible", timeout: 45000 });
       } catch (err) {
-        // Fallback to text match if role locator fails
         console.log("[EXPORT] Export button role locator failed, retrying by text...");
         exportLocator = page.getByText(/^\s*export\s*$/i).first();
         await exportLocator.waitFor({ state: "visible", timeout: 15000 });
@@ -265,9 +279,7 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 
       console.log("[EXPORT] Found Export button, clicking...");
 
-      //
       // 4) Click Export & capture the download
-      //
       const [download] = await Promise.all([
         page.waitForEvent("download", { timeout: 120000 }),
         exportLocator.click({ force: true }),
