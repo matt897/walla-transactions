@@ -27,7 +27,7 @@ app.use((req, _res, next) => {
 });
 
 // ----------------------------------------
-// Healthcheck
+// Healthcheck (must always respond)
 // ----------------------------------------
 app.get("/healthz", (_req, res) => {
   res.send("ok");
@@ -78,17 +78,12 @@ async function withBrowser(fn, opts = {}) {
       ignoreHTTPSErrors: true,
       locale: "en-US",
       timezoneId: "America/New_York",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      viewport: { width: 1360, height: 1800 },
     });
-
-    context.setDefaultNavigationTimeout(120000);
-    context.setDefaultTimeout(90000);
 
     await context.addInitScript(() => {
       try {
-        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        window.scrollTo(0, 0);
       } catch {
         // ignore
       }
@@ -104,84 +99,61 @@ async function withBrowser(fn, opts = {}) {
 }
 
 // ----------------------------------------
-// Login helper – logs in on the *current* page
+// Login helper – logs in on the *current* page using accessible labels
 // ----------------------------------------
 async function loginOnCurrentPage(page, username, password) {
   console.log("[LOGIN] Attempting login on URL:", page.url());
 
-  const emailCandidates = [
-    'input[type="email"]',
-    'input[name*="email" i]',
-    'input[id*="email" i]',
-    'input[placeholder*="email" i]',
-    'input[type="text"][name*="email" i]',
-    'input[type="text"][id*="email" i]',
-    'input[type="text"][name*="user" i]',
-    'input[type="text"][id*="user" i]',
-  ];
+  const emailInput = page.getByLabel(/email/i).first();
+  const passwordInput = page.getByLabel(/password/i).first();
+  const loginButton = page
+    .locator(
+      [
+        "button:has-text('Log in')",
+        "button:has-text('Sign in')",
+        "button:has-text('Login')",
+        "[type='submit']",
+      ].join(", ")
+    )
+    .first();
 
-  let emailInput = null;
-  for (const sel of emailCandidates) {
-    emailInput = await page.$(sel);
-    if (emailInput) {
-      console.log("[LOGIN] Found email input via selector:", sel);
-      break;
-    }
-  }
-  if (!emailInput) {
-    throw new Error("Email/username input not found on login page");
-  }
-
-  const passwordCandidates = [
-    'input[type="password"]',
-    'input[name*="pass" i]',
-    'input[id*="pass" i]',
-    'input[autocomplete="current-password"]',
-  ];
-
-  let passwordInput = null;
-  for (const sel of passwordCandidates) {
-    passwordInput = await page.$(sel);
-    if (passwordInput) {
-      console.log("[LOGIN] Found password input via selector:", sel);
-      break;
-    }
-  }
-  if (!passwordInput) {
-    throw new Error("Password input not found on login page");
-  }
+  await Promise.all([
+    emailInput.waitFor({ state: "visible", timeout: 15000 }),
+    passwordInput.waitFor({ state: "visible", timeout: 15000 }),
+  ]);
 
   await emailInput.fill(username);
   await passwordInput.fill(password);
-
-  const loginButtonCandidates = [
-    'button:has-text("Log in")',
-    'button:has-text("Login")',
-    'button:has-text("Sign in")',
-    'button:has-text("Sign In")',
-    'button[type="submit"]',
-    'input[type="submit"]',
-  ];
-
-  let loginButton = null;
-  for (const sel of loginButtonCandidates) {
-    loginButton = await page.$(sel);
-    if (loginButton) {
-      console.log("[LOGIN] Found login button via selector:", sel);
-      break;
-    }
-  }
-  if (!loginButton) {
-    throw new Error("Login button not found on login page");
-  }
+  await loginButton.waitFor({ state: "visible", timeout: 15000 });
 
   await Promise.all([
-    page.waitForNavigation({ timeout: 30000, waitUntil: "domcontentloaded" }).catch(() => {}),
-    loginButton.click({ force: true }),
+    page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 30000,
+    }),
+    loginButton.click(),
   ]);
 
   console.log("[LOGIN] Clicked login button, current URL:", page.url());
 }
+
+// ----------------------------------------
+// Utility URL helpers
+// ----------------------------------------
+const isLoginPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/login");
+  } catch {
+    return false;
+  }
+};
+
+const isReportPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/reports/first-purchase");
+  } catch {
+    return false;
+  }
+};
 
 // ----------------------------------------
 // Walla First-Purchase Export Route
@@ -190,6 +162,8 @@ async function loginOnCurrentPage(page, username, password) {
 // Optional: ?webhook=https://... to POST the file somewhere
 // ----------------------------------------
 app.get("/export-walla-first-purchase", async (req, res) => {
+  console.log("[EXPORT] Incoming request:", req.query);
+
   const { start, end, webhook } = req.query;
 
   if (!start || !end) {
@@ -212,11 +186,10 @@ app.get("/export-walla-first-purchase", async (req, res) => {
   }
 
   try {
+    console.log("[EXPORT] Launching browser...");
+
     const result = await withBrowser(async ({ page }) => {
-      //
       // 1) Build first-purchase report URL with dates
-      //    We go there *first*, Walla will redirect to /login?redirectUrl=...
-      //
       const reportUrl = new URL(
         "https://manage.hellowalla.com/the-pearl/reports/first-purchase"
       );
@@ -228,19 +201,20 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       reportUrl.searchParams.set("groupBy", "week");
 
       const reportUrlStr = reportUrl.toString();
-      console.log("[EXPORT] Navigating to report URL:", reportUrlStr);
 
-      await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+      // 2) Navigate explicitly to login with redirect to report
+      const loginUrl = `https://manage.hellowalla.com/login?redirectUrl=${encodeURIComponent(
+        reportUrlStr
+      )}&bizId=2657&bizName=The+Pearl`;
+
+      console.log("[EXPORT] Navigating to login URL:", loginUrl);
+      await page.goto(loginUrl, { waitUntil: "domcontentloaded" });
       console.log("[EXPORT] After initial goto, URL:", page.url());
 
-      //
-      // 2) If we got redirected to login, perform login there
-      //
-      if (page.url().includes("/login")) {
-        console.log("[EXPORT] Detected login redirect, performing login...");
+      if (isLoginPage(page.url())) {
+        console.log("[EXPORT] Detected login page, performing login...");
         await loginOnCurrentPage(page, username, password);
 
-        // After login, Walla should send us to redirectUrl (the report)
         try {
           await page.waitForURL(
             (url) =>
@@ -249,34 +223,47 @@ app.get("/export-walla-first-purchase", async (req, res) => {
             { timeout: 30000 }
           );
         } catch {
-          // Fallback: just go to the report URL again now that we're logged in
-          console.log("[EXPORT] Login done but did not reach report; going there explicitly...");
+          console.log(
+            "[EXPORT] Login done but did not reach report; going there explicitly..."
+          );
           await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
         }
       }
 
       console.log("[EXPORT] Post-login URL:", page.url());
+      if (isLoginPage(page.url())) {
+        throw new Error(
+          `Still on login page after attempted login. Current URL: ${page.url()}`
+        );
+      }
+
+      if (!isReportPage(page.url())) {
+        console.log("[EXPORT] Navigating to report URL after login...");
+        await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+      }
+
+      if (isLoginPage(page.url())) {
+        throw new Error(
+          `Unexpected redirect back to login after navigation. Current URL: ${page.url()}`
+        );
+      }
+
       await page.waitForTimeout(3000); // let React render
 
-      //
       // 3) Find Export button
-      //
-      const exportLocator =
-        (await page.$('button:has-text("Export")')) ||
-        (await page.$('div:has-text("Export")')) ||
-        (await page.$('text=Export'));
+      let exportLocator = page.getByRole("button", { name: /export/i }).first();
 
-      if (!exportLocator) {
-        throw new Error(
-          `Export button not found on report page. Current URL: ${page.url()}`
-        );
+      try {
+        await exportLocator.waitFor({ state: "visible", timeout: 45000 });
+      } catch (err) {
+        console.log("[EXPORT] Export button role locator failed, retrying by text...");
+        exportLocator = page.getByText(/^\s*export\s*$/i).first();
+        await exportLocator.waitFor({ state: "visible", timeout: 15000 });
       }
 
       console.log("[EXPORT] Found Export button, clicking...");
 
-      //
       // 4) Click Export & capture the download
-      //
       const [download] = await Promise.all([
         page.waitForEvent("download", { timeout: 120000 }),
         exportLocator.click({ force: true }),
@@ -300,6 +287,8 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 
       return { fileName, mimeType, fileBase64 };
     });
+
+    console.log("[EXPORT] Browser run finished, preparing response...");
 
     // Optional: send to webhook
     let webhookResult = null;
@@ -328,7 +317,7 @@ app.get("/export-walla-first-purchase", async (req, res) => {
       webhookResult,
     });
   } catch (err) {
-    console.error("Walla export failed:", err);
+    console.error("[EXPORT] Walla export failed:", err);
     return res.status(500).json({
       ok: false,
       error: "export_failed",
@@ -340,7 +329,7 @@ app.get("/export-walla-first-purchase", async (req, res) => {
 // ----------------------------------------
 // Start server
 // ----------------------------------------
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8082;
 app.listen(PORT, () => {
   console.log(`walla-transactions scraper listening on port ${PORT}`);
 });
