@@ -139,21 +139,21 @@ async function loginOnCurrentPage(page, username, password) {
 // ----------------------------------------
 // Utility URL helpers
 // ----------------------------------------
-const isLoginPage = (url) => {
+function isLoginPage(url) {
   try {
     return new URL(url).pathname.includes("/login");
   } catch {
     return false;
   }
-};
+}
 
-const isReportPage = (url) => {
+function isReportPage(url) {
   try {
     return new URL(url).pathname.includes("/reports/first-purchase");
   } catch {
     return false;
   }
-};
+}
 
 // ----------------------------------------
 // Walla First-Purchase Export Route
