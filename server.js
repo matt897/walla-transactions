@@ -137,25 +137,6 @@ async function loginOnCurrentPage(page, username, password) {
 }
 
 // ----------------------------------------
-// Utility URL helpers
-// ----------------------------------------
-function isLoginPage(url) {
-  try {
-    return new URL(url).pathname.includes("/login");
-  } catch {
-    return false;
-  }
-}
-
-function isReportPage(url) {
-  try {
-    return new URL(url).pathname.includes("/reports/first-purchase");
-  } catch {
-    return false;
-  }
-}
-
-// ----------------------------------------
 // Walla First-Purchase Export Route
 // ----------------------------------------
 // GET /export-walla-first-purchase?start=YYYY-MM-DD&end=YYYY-MM-DD
