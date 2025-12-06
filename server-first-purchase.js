@@ -1,5 +1,5 @@
 // server.js
-// Walla "sales (cash basis)" export scraper
+// Walla "first purchase" export scraper
 
 import express from "express";
 import cors from "cors";
@@ -19,7 +19,7 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 // ----------------------------------------
-// Basic request logger
+// Basic request logger (optional but handy)
 // ----------------------------------------
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.url}`);
@@ -27,7 +27,7 @@ app.use((req, _res, next) => {
 });
 
 // ----------------------------------------
-// Healthcheck
+// Healthcheck (must always respond)
 // ----------------------------------------
 app.get("/healthz", (_req, res) => {
   res.send("ok");
@@ -78,17 +78,15 @@ async function withBrowser(fn, opts = {}) {
       ignoreHTTPSErrors: true,
       locale: "en-US",
       timezoneId: "America/New_York",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      viewport: { width: 1360, height: 1800 },
     });
 
-    context.setDefaultNavigationTimeout(120000);
-    context.setDefaultTimeout(90000);
+    context.setDefaultNavigationTimeout(180000);
+    context.setDefaultTimeout(180000);
 
     await context.addInitScript(() => {
       try {
-        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        window.scrollTo(0, 0);
       } catch {
         // ignore
       }
@@ -104,53 +102,80 @@ async function withBrowser(fn, opts = {}) {
 }
 
 // ----------------------------------------
-// Login helper – logs in on the *current* page
+// Login helper – logs in on the *current* page using accessible labels
 // ----------------------------------------
 async function loginOnCurrentPage(page, username, password) {
   console.log("[LOGIN] Attempting login on URL:", page.url());
 
-  const emailInput = page.getByLabel(/email/i);
-  const passwordInput = page.getByLabel(/password/i);
-
-  await Promise.all([
-    emailInput.waitFor({ state: "visible", timeout: 20000 }),
-    passwordInput.waitFor({ state: "visible", timeout: 20000 }),
-  ]);
-
-  await emailInput.fill(username);
-  await passwordInput.fill(password);
-
+  const emailInput = page.getByLabel(/email/i).first();
+  const passwordInput = page.getByLabel(/password/i).first();
   const loginButton = page
     .getByRole("button", { name: /log in|login|sign in/i })
     .first();
 
-  await loginButton.waitFor({ state: "visible", timeout: 15000 });
+  try {
+    await emailInput.waitFor({ state: "visible", timeout: 15000 });
+    console.log("[LOGIN] Email input found");
+  } catch (err) {
+    throw new Error("[LOGIN] Email input not found: " + err);
+  }
+
+  try {
+    await passwordInput.waitFor({ state: "visible", timeout: 15000 });
+    console.log("[LOGIN] Password input found");
+  } catch (err) {
+    throw new Error("[LOGIN] Password input not found: " + err);
+  }
+
+  await emailInput.fill(username);
+  await passwordInput.fill(password);
+
+  try {
+    await loginButton.waitFor({ state: "visible", timeout: 15000 });
+    console.log("[LOGIN] Login button found");
+  } catch (err) {
+    throw new Error("[LOGIN] Login button not found: " + err);
+  }
 
   await Promise.all([
     page.waitForURL((url) => !url.pathname.includes("/login"), {
-      timeout: 30000,
+      timeout: 60000,
     }),
     loginButton.click(),
   ]);
 
   console.log("[LOGIN] Clicked login button, current URL:", page.url());
-}
 
-function isLoginPageUrl(urlString) {
-  try {
-    return new URL(urlString).pathname.includes("/login");
-  } catch {
-    return false;
+  if (page.url().includes("/login")) {
+    throw new Error(`Login failed – still on login page: ${page.url()}`);
   }
 }
 
 // ----------------------------------------
-// Walla Sales Export Route (cash basis)
+// Walla First-Purchase Export Route
 // ----------------------------------------
-// GET /export-walla-sales?start=YYYY-MM-DD&end=YYYY-MM-DD
+// GET /export-walla-first-purchase?start=YYYY-MM-DD&end=YYYY-MM-DD
 // Optional: ?webhook=https://... to POST the file somewhere
 // ----------------------------------------
-app.get("/export-walla-sales", async (req, res) => {
+const isLoginPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/login");
+  } catch {
+    return false;
+  }
+};
+
+const isReportPage = (url) => {
+  try {
+    return new URL(url).pathname.includes("/reports/first-purchase");
+  } catch {
+    return false;
+  }
+};
+
+app.get("/export-walla-first-purchase", async (req, res) => {
+  console.log("[EXPORT] Incoming request:", req.query);
+
   const { start, end, webhook } = req.query;
 
   if (!start || !end) {
@@ -173,84 +198,117 @@ app.get("/export-walla-sales", async (req, res) => {
   }
 
   try {
-    const result = await withBrowser(async ({ page }) => {
-      // 1) Build SALES report URL with your params + dynamic dates
-      const reportUrl = new URL(
-        "https://manage.hellowalla.com/the-pearl/reports/sales"
-      );
+    console.log("[EXPORT] Launching browser...");
 
-      reportUrl.searchParams.set("basis", "cash");
-      reportUrl.searchParams.set("cashViewBy", "paid-date");
-      reportUrl.searchParams.set("virtualDisplay", "by-location");
+    const result = await withBrowser(async ({ page }) => {
+      // 1) Build first-purchase report URL with dates
+      const reportUrl = new URL(
+        "https://manage.hellowalla.com/the-pearl/reports/first-purchase"
+      );
+      reportUrl.searchParams.set("offeringId", "all");
       reportUrl.searchParams.set("locationId", "all");
       reportUrl.searchParams.set("timeFrameId", "custom");
-      reportUrl.searchParams.set("startDate", String(start)); // no extra "="
-      reportUrl.searchParams.set("endDate", String(end));     // no extra "="
-      reportUrl.searchParams.set("page", "1");
-      reportUrl.searchParams.set("pageSize", "1000");
-      reportUrl.searchParams.set("sort", "date");
-      reportUrl.searchParams.set("sortDir", "desc");
-      reportUrl.searchParams.set("reportCashCategory", "all");
-      reportUrl.searchParams.set("paymentMethod", "all");
+      reportUrl.searchParams.set("startDate", String(start));
+      reportUrl.searchParams.set("endDate", String(end));
+      reportUrl.searchParams.set("groupBy", "week");
 
       const reportUrlStr = reportUrl.toString();
 
-      // 2) Explicit login URL with redirect back to SALES report
+      // 2) Navigate explicitly to login with redirect to report
       const loginUrl = `https://manage.hellowalla.com/login?redirectUrl=${encodeURIComponent(
         reportUrlStr
       )}&bizId=2657&bizName=The+Pearl`;
 
-      console.log("[SALES] Navigating to login URL:", loginUrl);
+      console.log("[EXPORT] Navigating to login URL:", loginUrl);
       await page.goto(loginUrl, { waitUntil: "domcontentloaded" });
-      console.log("[SALES] After initial goto, URL:", page.url());
+      console.log("[EXPORT] After initial goto, URL:", page.url());
 
-      // 3) Login if needed
-      if (isLoginPageUrl(page.url())) {
-        console.log("[SALES] Detected login, performing login...");
+      if (isLoginPage(page.url())) {
+        console.log("[EXPORT] Detected login page, performing login...");
         await loginOnCurrentPage(page, username, password);
 
         try {
           await page.waitForURL(
             (url) =>
               !url.pathname.includes("/login") &&
-              url.href.includes("/reports/sales"),
+              url.href.includes("/reports/first-purchase"),
             { timeout: 30000 }
           );
         } catch {
           console.log(
-            "[SALES] Login done but did not reach sales report; going there explicitly..."
+            "[EXPORT] Login done but did not reach report; going there explicitly..."
           );
           await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+try {
+  await page.waitForLoadState("networkidle", { timeout: 60000 });
+} catch (err) {
+  console.warn("[EXPORT] networkidle never reached, continuing anyway:", err);
+}
+          console.log("[EXPORT] URL after fallback report navigation:", page.url());
         }
       }
 
-      console.log("[SALES] Post-login URL:", page.url());
-
-      if (isLoginPageUrl(page.url())) {
+      console.log("[EXPORT] Post-login URL:", page.url());
+      if (isLoginPage(page.url())) {
         throw new Error(
           `Still on login page after attempted login. Current URL: ${page.url()}`
         );
       }
 
-      // Let React render
-      await page.waitForTimeout(3000);
+      if (!isReportPage(page.url())) {
+        console.log("[EXPORT] Navigating to report URL after login...");
+        await page.goto(reportUrlStr, { waitUntil: "domcontentloaded" });
+        await page.waitForLoadState("networkidle", { timeout: 60000 });
+        console.log("[EXPORT] URL after explicit report navigation:", page.url());
+      }
 
-      // 4) Find Export button
-      const exportLocator = page.getByText(/^\s*export\s*$/i).first();
-
-      try {
-        await exportLocator.waitFor({ state: "visible", timeout: 60000 });
-      } catch (err) {
+      if (isLoginPage(page.url())) {
         throw new Error(
-          `Export button not found – likely no data in this date range. Current URL: ${page.url()} | Inner error: ${err}`
+          `Unexpected redirect back to login: ${page.url()}`
         );
       }
 
-      console.log("[SALES] Found Export button, clicking...");
+      await page.waitForTimeout(3000); // let React render
 
-      // 5) Click Export & capture download
+      // 3) Wait for table/header and find Export button
+      await page
+        .getByText(/client id/i)
+        .first()
+        .waitFor({ state: "visible", timeout: 60000 })
+        .catch(() => {});
+
+      let exportLocator = page.getByRole("button", { name: /export/i }).first();
+
+      try {
+        await exportLocator.waitFor({ state: "visible", timeout: 30000 });
+      } catch (err) {
+        console.log(
+          "[EXPORT] Role-based export button lookup failed, trying text-only selector...",
+          err
+        );
+        exportLocator = page.getByText(/export/i).first();
+        try {
+          await exportLocator.waitFor({ state: "visible", timeout: 30000 });
+        } catch (fallbackErr) {
+          const bodyText = await page
+            .textContent("body")
+            .catch(() => "<unable to read body>");
+          console.log("[EXPORT] Current URL when failing to find export:", page.url());
+          console.log(
+            "[EXPORT] Body excerpt:",
+            bodyText ? bodyText.slice(0, 500) : "<no body text>"
+          );
+          throw new Error(
+            `Export button not found – likely no data in this date range. Current URL: ${page.url()}`
+          );
+        }
+      }
+
+      console.log("[EXPORT] Found Export button, clicking...");
+
+      // 4) Click Export & capture the download
       const [download] = await Promise.all([
-        page.waitForEvent("download", { timeout: 180000 }),
+        page.waitForEvent("download", { timeout: 120000 }),
         exportLocator.click({ force: true }),
       ]);
 
@@ -268,10 +326,12 @@ app.get("/export-walla-sales", async (req, res) => {
       const buffer = await streamToBuffer(stream);
       const fileBase64 = buffer.toString("base64");
 
-      console.log("[SALES] Download complete:", fileName, mimeType);
+      console.log("[EXPORT] Download complete:", fileName, mimeType);
 
       return { fileName, mimeType, fileBase64 };
     });
+
+    console.log("[EXPORT] Browser run finished, preparing response...");
 
     // Optional: send to webhook
     let webhookResult = null;
@@ -300,11 +360,24 @@ app.get("/export-walla-sales", async (req, res) => {
       webhookResult,
     });
   } catch (err) {
-    console.error("Walla SALES export failed:", err);
+    console.error("[EXPORT] Walla export failed:", err);
+    const message = String(err);
+
+    if (
+      message.includes("Export button not found") ||
+      message.toLowerCase().includes("likely no data")
+    ) {
+      return res.status(200).json({
+        ok: false,
+        error: "no_export_button",
+        details: message,
+      });
+    }
+
     return res.status(500).json({
       ok: false,
       error: "export_failed",
-      details: String(err),
+      details: message,
     });
   }
 });
