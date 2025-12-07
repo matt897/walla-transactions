@@ -109,13 +109,16 @@ async function withBrowser(fn, opts = {}) {
 async function loginOnCurrentPage(page, username, password) {
   console.log("[LOGIN] Attempting login on URL:", page.url());
 
-  const emailInput = page.getByLabel(/email/i);
-  const passwordInput = page.getByLabel(/password/i);
+  // Email: still safe to use label
+  const emailInput = page.getByLabel(/email/i).first();
+  await emailInput.waitFor({ state: "visible", timeout: 20000 });
 
-  await Promise.all([
-    emailInput.waitFor({ state: "visible", timeout: 20000 }),
-    passwordInput.waitFor({ state: "visible", timeout: 20000 }),
-  ]);
+  // Password: target only the actual input, not the "show password" button
+  const passwordInput = page
+    .locator("input[type='password'], input[name='password'], input#password")
+    .first();
+
+  await passwordInput.waitFor({ state: "visible", timeout: 20000 });
 
   await emailInput.fill(username);
   await passwordInput.fill(password);
@@ -184,8 +187,8 @@ app.get("/export-walla-sales", async (req, res) => {
       reportUrl.searchParams.set("virtualDisplay", "by-location");
       reportUrl.searchParams.set("locationId", "all");
       reportUrl.searchParams.set("timeFrameId", "custom");
-      reportUrl.searchParams.set("startDate", String(start)); // no extra "="
-      reportUrl.searchParams.set("endDate", String(end));     // no extra "="
+      reportUrl.searchParams.set("startDate", String(start));
+      reportUrl.searchParams.set("endDate", String(end));
       reportUrl.searchParams.set("page", "1");
       reportUrl.searchParams.set("pageSize", "1000");
       reportUrl.searchParams.set("sort", "date");
